@@ -46,7 +46,7 @@ def get_normalize_list(list):
         return []
     _mean = float(sum(list)) / len(list)
     _std = np.std(list)
-    return [(v - _mean) / _std for v in list]
+    return [(v - _mean) / _std for v in list], _mean, _std
 
 class Data:
 
@@ -64,8 +64,9 @@ class Data:
         self.batch_size = batch_size
         self.train_ratio = train_ratio
         self.verbose = verbose
+        self.feature_norm = []
 
-        self.threshold = 0.005
+        self.threshold = 0.006
 
     def _get_danil(self, report):
         prices = report["prices"]
@@ -74,7 +75,7 @@ class Data:
         prices = sorted(prices, key=lambda x: x["minute"])
         prices = sorted(prices, key=lambda x: x["date"])
         y = float(prices[-1]["close"] - prices[0]["open"]) / float(prices[0]["open"])
-        volume = (report["prices"][0]["volume"] + report["prices"][1]["volume"]) / 2 * report["prices"][0]["volume"]
+        volume = (report["prices"][0]["volume"] + report["prices"][1]["volume"]) / 2 * report["prices"][0]["open"]
         features = [
             np.log(1 + int(report["prices"][0].get("marketcap"))) if report["prices"][0].get("marketcap") else None,
             report["prices"][0].get("foreign"),
@@ -124,7 +125,7 @@ class Data:
         prices = sorted(prices, key=lambda x: x["minute"])
         prices = sorted(prices, key=lambda x: x["date"])
         y = float(prices[-1]["close"] - prices[0]["open"]) / float(prices[0]["open"])
-        volume = (report["prices"][0]["volume"] + report["prices"][1]["volume"]) / 2 * report["prices"][0]["volume"]
+        volume = (report["prices"][0]["volume"] + report["prices"][1]["volume"]) / 2 * report["prices"][0]["open"]
         cb_amount = report.get("cb_amount")
         features = [
             np.log(1 + int(report["prices"][0].get("marketcap"))) if report["prices"][0].get("marketcap") else None,
@@ -151,6 +152,7 @@ class Data:
 
     def load(self):
         _stock_data, answer = [], []
+        self.feature_norm = []
         with open(pjoin("data", "dart_report.json"), "r", newline='', encoding='utf-8') as fin:
             dart_reports = json.load(fin)
             assert self.report in dart_reports
@@ -167,7 +169,8 @@ class Data:
         data_transfer = []
         for i in range(self.feature_len):
             _feature = [v[i] for v in _stock_data]
-            _feature = get_normalize_list(_feature)
+            _feature, _mean, _std = get_normalize_list(_feature)
+            self.feature_norm.append((_mean, _std))
             data_transfer.append(_feature)
         for i in range(len(_stock_data)):
             _data = []
@@ -237,6 +240,12 @@ class Classifier:
         self.train_ratio = train_ratio
         self.verbose = verbose
 
+        self.data_iter = Data(report=self.report,
+                              feat_len=self.feat_len,
+                              batch_size=self.batch_size,
+                              train_ratio=self.train_ratio)
+        self.data_iter.launch()
+
         self.log_path = "tmp/tensorboard"
         self.checkpoint_path = "tmp/checkpoint"
         self.epochs = epochs
@@ -263,16 +272,19 @@ class Classifier:
         return model
 
     def feed_forward(self, x):
-        embd = self._feed_forward([x.reshape(1, self.feat_len, 1), 0])
-        return embd.reshape(-1) # flatten
+        assert len(x) == len(self.data_iter.feature_norm), "feature number {}, {}".format(len(x), len(self.data_iter.feature_norm))
+        _x = [(d - _mean) / _std for d, (_mean, _std) in zip(x, self.data_iter.feature_norm)]
+        _x = np.array(_x)
+        embd = self._feed_forward([_x.reshape(-1, self.feat_len), 0])
+        return embd
 
     def feed_forward_batch(self, x):
         embd = self._feed_forward([x, 0])
         return embd
 
-    def test(self, iterator):
-        test_batch = iterator.get_test_batch_num()
-        test_iterator = iterator.gen_test()
+    def test(self):
+        test_batch = self.data_iter.get_test_batch_num()
+        test_iterator = self.data_iter.gen_test()
         return_log = []
         total_test_num = 0
         for b in range(test_batch):
@@ -285,36 +297,33 @@ class Classifier:
         all_return = 1.0
         plot_data = []
         for ret in return_log:
-            all_return *= (1+ret - 0.005)
+            all_return *= (1+ret - 0.007)
             plot_data.append(all_return)
         self.logger.info("average return : {} all_return : {}".format(avg_return, all_return))
-        plt.plot(plot_data)
-        plt.show()
+        # plt.plot(plot_data)
+        # plt.show()
 
     def train(self):
         self.logger.info("start training")
-        data_iter = Data(report=self.report,
-                         feat_len=self.feat_len,
-                         batch_size=self.batch_size,
-                         train_ratio=self.train_ratio)
-        data_iter.launch()
+
         net = self.build_model()
         pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
-        checkpointer = ModelCheckpoint(filepath=self.checkpoint_path+"{epoch:02d}-{val_loss:.4f}.hdf5",
-                                       verbose=True, monitor="val_loss", save_best_only=True)
-        tensor_board = TensorBoard(log_dir=self.log_path, histogram_freq=0,
-                                   write_graph=True, write_images=True, batch_size=self.batch_size)
-        callbacks = [checkpointer, tensor_board]
-        net.fit_generator(data_iter.gen_train(),
-                          steps_per_epoch=data_iter.get_train_batch_num(),
+        # checkpointer = ModelCheckpoint(filepath=self.checkpoint_path+"{epoch:02d}-{val_loss:.4f}.hdf5",
+        #                                verbose=True, monitor="val_loss", save_best_only=True)
+        # tensor_board = TensorBoard(log_dir=self.log_path, histogram_freq=0,
+        #                            write_graph=True, write_images=True, batch_size=self.batch_size)
+        # callbacks = [checkpointer, tensor_board]
+        net.fit_generator(self.data_iter.gen_train(),
+                          steps_per_epoch=self.data_iter.get_train_batch_num(),
                           epochs=self.epochs,
-                          verbose=True,
-                          callbacks=callbacks,
-                          validation_data=data_iter.gen_vali(),
-                          validation_steps=data_iter.get_vali_batch_num(),
+                          verbose=False,
+                          # callbacks=callbacks,
+                          validation_data=self.data_iter.gen_vali(),
+                          validation_steps=self.data_iter.get_vali_batch_num(),
                           initial_epoch=0)
-
-        self.test(data_iter)
+        print(self.data_iter.feature_norm)
+        # self.feed_forward([20, 0.5, 0.5, 8])
+        self.test()
 
         net.save(pjoin("res", "dart.h5"))
 

@@ -23,6 +23,24 @@ def ibs(o, h, l, c):
     """
     return (c - l) / (h - l + 1e-8)
 
+def rsi(prices):
+    # N in rsi is dynamically set with len(prices)
+    returns = [(prices[i+1]-prices[i]) / prices[i] for i in range(len(prices)-1)]
+    u = [max(r, 0) for r in returns]
+    d = [-min(r, 0) for r in returns]
+    au, ad = sum(u), sum(d)
+    _rsi = au / (au + ad + 1e-10)
+    return _rsi
+
+def mfi(highs, lows, closes, volumes):
+    typical_prices = [(high + low + close) / 3 for high, low, close in zip(highs, lows, closes)]
+    MF = [volume * tp for volume, tp in zip(volumes, typical_prices)]
+    PMF = [MF[i+1] for i in range(len(typical_prices)) if typical_prices[i] < typical_prices[i+1]]
+    NMF = [MF[i+1] for i in range(len(typical_prices)) if typical_prices[i] > typical_prices[i+1]]
+    MR = PMF / (NMF + 1e-10)
+    MFI = MR / (1 + MR)
+    return MFI
+
 kospi_price_interval = [
     (500000, 1000),
     (100000, 500),
@@ -126,7 +144,15 @@ class Data:
 
                     # for X
                     for step in range(time_len - self.window - self.barrier):
-                        frames.append(ibss[step:step + self.window])
+                        _opens = opens[step:step+self.window]
+                        _highs = highs[step:step+self.window]
+                        _lows = lows[step:step+self.window]
+                        _closes = closes[step:step+self.window]
+                        _volumes = volumes[step:step+self.window]
+
+                        frame = ibss[step:step + self.window]
+                        frame.append(rsi(opens[step:step + self.window]))
+                        frames.append(frame)
 
                     marketkind = self.get_market_info(stockcode)
                     # for y
@@ -222,7 +248,7 @@ def f1_m(y_true, y_pred):
 
 class PatternModel:
 
-    def __init__(self, path="data/ninetoten.h5", batch_size=128, train_ratio=0.8, epochs=10, verbose=False):
+    def __init__(self, path="data/ninetoten.h5", batch_size=128, train_ratio=0.8, epochs=30, verbose=False):
         self.logger = get_logger()
         self.path = path
 
@@ -239,6 +265,8 @@ class PatternModel:
 
         # fc layer
         x = Dense(128)(pattern)
+        x = LeakyReLU()(x)
+        x = Dense(256)(x)
         x = LeakyReLU()(x)
         x = Dense(128)(x)
         x = LeakyReLU()(x)
