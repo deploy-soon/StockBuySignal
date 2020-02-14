@@ -1,16 +1,19 @@
 import h5py
 import json
+import time
 import random
 import pathlib
 import numpy as np
 from os.path import join as pjoin
-from keras.models import Model
-from keras import backend as K
-from keras.optimizers import Adam
-from keras.callbacks import ModelCheckpoint, TensorBoard
-from keras.layers import Input, Dense, LeakyReLU
+
+import torch
+from torch import nn, optim
+from torch.utils.data import Dataset, DataLoader, random_split
 
 from misc import get_logger
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def ibs(o, h, l, c):
     """
@@ -60,27 +63,27 @@ kosdaq_price_interval = [
 
 
 
-class Data:
+class Data(Dataset):
 
-    def __init__(self, path="data/ninetoten.h5", batch_size=128, train_ratio=0.8, verbose=False):
+    def __init__(self, path="data/ninetoten.h5", verbose=False):
 
         self.logger = get_logger()
         self.path = path
-        self.batch_size = batch_size
-        self.train_ratio = train_ratio
         self.verbose = verbose
 
         self.barrier = 4
         self.window = 7
         assert self.barrier > 0, "target inference"
 
-        with open("data/stock_meta.json", "r") as fin:
-            self.stock_meta = json.load(fin)
-            self.logger.info("stock meta info loaded {}".format(len(self.stock_meta)))
+        #with open("data/stock_meta.json", "r") as fin:
+        #    self.stock_meta = json.load(fin)
+        #    self.logger.info("stock meta info loaded {}".format(len(self.stock_meta)))
 
         self.transaction_fee = 0.0035
         self.threshold = 0.003
-
+        
+        self.load()
+        
     def get_market_info(self, stock_code):
         stock_info = self.stock_meta.get(stock_code, {})
         return stock_info.get("marketkind", None)
@@ -115,20 +118,20 @@ class Data:
             ...
         }
         """
-        stock_data, answer = [], []
+        stock_data, metas, pred, label = [], [], [], []
         with h5py.File(self.path, "r") as fin:
             for stockcode in fin.keys():
                 if self.verbose:
                     self.logger.info(stockcode)
-                if stockcode not in self.stock_meta:
-                    continue
-
+                #if stockcode not in self.stock_meta:
+                #    continue
                 datetimes = set(fin[stockcode]["dates"][:])
                 for _datetime in datetimes:
-                    opens = [i for i, p in zip(fin[stockcode]["opens"][:], fin[stockcode]["dates"][:]) if p == _datetime]
-                    highs = [i for i, p in zip(fin[stockcode]["highs"][:], fin[stockcode]["dates"][:]) if p == _datetime]
-                    lows = [i for i, p in zip(fin[stockcode]["lows"][:], fin[stockcode]["dates"][:]) if p == _datetime]
-                    closes = [i for i, p in zip(fin[stockcode]["closes"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    opens = [i for i, p in zip(fin[stockcode]["prices"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    #opens = [i for i, p in zip(fin[stockcode]["opens"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    #highs = [i for i, p in zip(fin[stockcode]["highs"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    #lows = [i for i, p in zip(fin[stockcode]["lows"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    #closes = [i for i, p in zip(fin[stockcode]["closes"][:], fin[stockcode]["dates"][:]) if p == _datetime]
                     volumes = [i for i, p in zip(fin[stockcode]["volumes"][:], fin[stockcode]["dates"][:]) if p == _datetime]
                     minutes = [i for i, p in zip(fin[stockcode]["minutes"][:], fin[stockcode]["dates"][:]) if
                                p == _datetime]
@@ -136,95 +139,66 @@ class Data:
                     if len(minutes) < 60:
                         continue
 
-                    ibss = []
-                    for o, h, l, c in zip(opens, highs, lows, closes):
-                        ibss.append(ibs(o, h, l, c))
+                    #ibss = []
+                    #for o, h, l, c in zip(opens, highs, lows, closes):
+                    #    ibss.append(ibs(o, h, l, c))
                     time_len = len(opens)
-                    frames, y = [], []
+                    frames, meta, y = [], [], []
 
                     # for X
                     for step in range(time_len - self.window - self.barrier):
                         _opens = opens[step:step+self.window]
-                        _highs = highs[step:step+self.window]
-                        _lows = lows[step:step+self.window]
-                        _closes = closes[step:step+self.window]
+                        #_highs = highs[step:step+self.window]
+                        #_lows = lows[step:step+self.window]
+                        #_closes = closes[step:step+self.window]
                         _volumes = volumes[step:step+self.window]
 
-                        frame = ibss[step:step + self.window]
-                        frame.append(rsi(opens[step:step + self.window]))
+                        frame = [[o, v] for o, v  in zip(_opens, _volumes)]
                         frames.append(frame)
+                        #TODO: add report info
+                        meta.append([1, 1])
 
-                    marketkind = self.get_market_info(stockcode)
+                    #marketkind = self.get_market_info(stockcode)
+                    marketkind = 1
+                    
                     # for y
                     for step in range(self.window, time_len - self.barrier):
                         buy_slippage = self.get_slippage(opens[step], marketkind)
-                        sell_slippage = self.get_slippage(closes[step + self.barrier - 1], marketkind)
-                        _y = (closes[step + self.barrier - 1] - opens[step] - buy_slippage - sell_slippage) / opens[step]
+                        #sell_slippage = self.get_slippage(closes[step + self.barrier - 1], marketkind)
+                        sell_slippage = 1
+                        #_y = (closes[step + self.barrier - 1] - opens[step] - buy_slippage - sell_slippage) / opens[step]
+                        _y = (opens[step + self.barrier - 1] - opens[step] - buy_slippage - sell_slippage) / opens[step]
                         _y = _y - self.transaction_fee
                         y.append(_y)
 
-                    assert len(frames) == len(y)
+                    assert len(frames) == len(y) == len(meta)
                     stock_data += frames
-                    answer += y
-
+                    metas += meta
+                    pred += y
+                    label += [1 if _y > self.threshold else 0 for _y in y]
+                #break        
         self.logger.info("Get Stock Data : {} patterns".format(len(stock_data)))
-        self.features = len(stock_data[0])
-        return stock_data, answer
+        self.data_len = len(stock_data)
+        self.features = len(stock_data[0][0])
+        self.num_meta = len(metas[0])
+        #TODO: ToTensor()
+        self.stock_data = torch.tensor(stock_data, dtype=torch.float)
+        self.metas = torch.tensor(metas, dtype=torch.float)
+        self.pred = torch.tensor(pred, dtype=torch.float)
+        self.label = torch.tensor(label, dtype=torch.float)
+    
+    def __len__(self):
+        return self.data_len
 
-    def test(self):
-        X, y = self.load()
-        print(X[:5], y[:5])
-        print(len(y))
-
-    def launch(self):
-        X, y = self.load()
-        perm = list(range(len(X)))
-        random.shuffle(perm)
-        X = [X[idx] for idx in perm]
-        y = [y[idx] for idx in perm]
-        y_binary = [1 if _y >= self.threshold else 0 for _y in y]
-        self.logger.info("one : {}, zero : {}".format(sum(y_binary), len(y) - sum(y_binary)))
-        self.train_num = int(len(X) * self.train_ratio)
-        self.vali_num = len(X) - self.train_num
-        self.logger.info("train num : {} | validation num : {}".format(self.train_num, self.vali_num))
-        self.train_X, self.train_y = X[:self.train_num], y_binary[:self.train_num]
-        self.vali_X, self.vali_y = X[self.train_num:], y_binary[self.train_num:]
-        self.test_y = y[self.train_num:]
-
-    def get_train_batch_num(self):
-        return self.train_num // self.batch_size
-
-    def get_vali_batch_num(self):
-        return self.vali_num // self.batch_size
-
-    def get_test_batch_num(self):
-        return self.vali_num // self.batch_size
-
-    def gen_train(self):
-        train_num = self.train_num // self.batch_size * self.batch_size
-        while True:
-            for offset in range(0, train_num, self.batch_size):
-                limit = min(train_num, offset + self.batch_size)
-                yield np.array(self.train_X[offset:limit]).reshape((-1, self.features)), \
-                      np.array(self.train_y[offset:limit])
-
-    def gen_vali(self):
-        vali_num = self.vali_num // self.batch_size * self.batch_size
-        while True:
-            for offset in range(0, vali_num, self.batch_size):
-                limit = min(vali_num, offset + self.batch_size)
-                yield np.array(self.vali_X[offset:limit]).reshape((-1, self.features)), \
-                      np.array(self.vali_y[offset:limit])
-
-    def gen_test(self):
-        test_num = self.vali_num // self.batch_size * self.batch_size
-        while True:
-            for offset in range(0, test_num, self.batch_size):
-                limit = min(test_num, offset + self.batch_size)
-                yield np.array(self.vali_X[offset:limit]).reshape((-1, self.features)), \
-                      np.array(self.test_y[offset:limit])
-
-
+    def __getitem__(self, index):
+        item = {
+            "frame": self.stock_data[index],
+            "meta": self.metas[index],
+            "pred": self.pred[index],
+            "label": self.label[index]
+        }
+        return item
+            
 
 def recall_m(y_true, y_pred):
     true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
@@ -246,99 +220,101 @@ def f1_m(y_true, y_pred):
     return 2 * ((precision * recall) / (precision + recall + K.epsilon()))
 
 
-class PatternModel:
+class Encoder(nn.Module):
 
-    def __init__(self, path="data/ninetoten.h5", batch_size=128, train_ratio=0.8, epochs=30, verbose=False):
-        self.logger = get_logger()
-        self.path = path
+    def __init__(self, features, hid_dim, layers, dropout):
+        super().__init__()
 
-        self.batch_size = batch_size
-        self.train_ratio = train_ratio
-        self.verbose = verbose
+        self.rnn = nn.LSTM(features, hid_dim, layers, dropout = dropout)
 
-        self.log_path = "tmp/tensorboard"
-        self.checkpoint_path = "tmp/checkpoint"
+    def forward(self, frame):
+        outputs, (hidden, cell) = self.rnn(frame)
+        return hidden, cell
+
+class Network(nn.Module):
+
+    def __init__(self, encoder, num_meta, hid_dim, device):
+        super().__init__()
+        self.encoder = encoder
+        self.embedding = nn.Linear(num_meta, hid_dim)
+        self.fc1 = nn.Linear(hid_dim * 2, hid_dim)
+        self.fc2 = nn.Linear(hid_dim, 1)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+        self.device = device
+
+    def forward(self, frame, meta):
+        hidden, _ = self.encoder(frame)
+        emb = self.embedding(meta)
+        x = self.fc1(torch.cat((hidden[1], emb), dim=1))
+        output = torch.sigmoid(self.fc2(x))
+        return output
+
+
+class Train:
+
+    def __init__(self, epochs=10, batch_size=4):
+        self.data = Data()
+        data_len = len(self.data)
+        train_num = int(data_len * 0.8)
+        valid_num = int(data_len * 0.1)
+        test_num = data_len - train_num - valid_num
+        train, valid, test = random_split(self.data, [train_num, valid_num, test_num])
+        self.train_iter = DataLoader(train, batch_size = batch_size, shuffle=True, num_workers=4)
+        self.valid_iter = DataLoader(valid, batch_size = batch_size, shuffle=True, num_workers=4)
+        self.test_iter = DataLoader(test, batch_size = batch_size, shuffle=True, num_workers=4)
+        self.encoder = Encoder(features=self.data.features,
+                               hid_dim = 64,
+                               layers=2,
+                               dropout=0.7)
+        self.network = Network(encoder=self.encoder,
+                               num_meta=self.data.num_meta,
+                               hid_dim=64,
+                               device=device).to(device)
+        print(self.network)
         self.epochs = epochs
+        self.batch_size = batch_size
+        
+    @staticmethod
+    def init_weights(m):
+        for name, param in m.named_parameters():
+            nn.init.uniform_(param.data, -0.1, 0.1)
 
-    def build_model(self, with_compile=True):
-        pattern = Input(shape=(self.features, ))
+    def count_parameters(self, model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-        # fc layer
-        x = Dense(128)(pattern)
-        x = LeakyReLU()(x)
-        x = Dense(256)(x)
-        x = LeakyReLU()(x)
-        x = Dense(128)(x)
-        x = LeakyReLU()(x)
-        output = Dense(1, activation="sigmoid", name="logits")(x)
-        model = Model(pattern, output)
-        model.summary()
-        if with_compile:
-            optimizer = Adam(lr=0.0001)
-            model.compile(optimizer=optimizer,
-                          loss='binary_crossentropy',
-                          metrics=["accuracy", f1_m, recall_m, precision_m])
-        self._feed_forward = K.function([model.input, K.learning_phase()],
-                                        [model.get_layer("logits").output])
+    def train(self, iterator, optimizer, criterion, batch_size):
+        self.network.train()
 
-        return model
+        epoch_loss = 0
+        for i, batch in enumerate(iterator):
+            frame = batch["frame"].view(-1, self.batch_size, self.data.features).to(device)
+            meta = batch["meta"].to(device)
+            label = batch["label"].view(-1, 1).to(device)
 
-    def feed_forward(self, x):
-        embd = self._feed_forward([x.reshape(1, self.features, 1), 0])
-        return embd.reshape(-1) # flatten
+            output = self.network(frame, meta)
+            optimizer.zero_grad()
+            loss = criterion(output, label)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1)
+            optimizer.step()
+            epoch_loss += loss.item()
+            
+        return epoch_loss / len(iterator)
 
-    def feed_forward_batch(self, x):
-        embd = self._feed_forward([x, 0])
-        return embd
+    def run(self):
+        optimizer = optim.Adam(self.network.parameters())
+        criterion = nn.BCELoss()
 
-    def test(self, iterator):
-        test_batch = iterator.get_test_batch_num()
-        test_iterator = iterator.gen_test()
-        return_log = []
-        total_test_num = 0
-        for b in range(test_batch):
-            test_X, test_y = next(test_iterator)
-            test_pred = self.feed_forward_batch(test_X)[0]
-            return_log += [_y for _y, _pred in zip(test_y, test_pred) if _pred > 0.5]
-            total_test_num += len(test_y)
-        self.logger.info("select {} signal among {} cases".format(len(return_log), total_test_num))
-        avg_return = sum(return_log) / (len(return_log) + 1e-8)
-        all_return = 1.0
-        for ret in return_log:
-            all_return *= (1+ret)
-        self.logger.info("average return : {} all_return : {}".format(avg_return, all_return))
-
-    def train(self):
-        self.logger.info("start training")
-        data_iter = Data(path=self.path,
-                         batch_size=self.batch_size,
-                         train_ratio=self.train_ratio)
-        data_iter.launch()
-        self.features = data_iter.features
-        net = self.build_model()
-        pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
-        # checkpointer = ModelCheckpoint(filepath=self.checkpoint_path+"{epoch:02d}-{val_loss:.4f}.hdf5",
-        #                                verbose=True, monitor="val_loss", save_best_only=True)
-        # tensor_board = TensorBoard(log_dir=self.log_path, histogram_freq=0,
-        #                            write_graph=True, write_images=True, batch_size=self.batch_size)
-        # callbacks = [checkpointer, tensor_board]
-        net.fit_generator(data_iter.gen_train(),
-                          steps_per_epoch=data_iter.get_train_batch_num(),
-                          epochs=self.epochs,
-                          verbose=True,
-                          # callbacks=callbacks,
-                          validation_data=data_iter.gen_vali(),
-                          validation_steps=data_iter.get_vali_batch_num(),
-                          initial_epoch=0)
-
-        self.test(data_iter)
-
-        net.save(pjoin("res", "pattern.h5"))
-
+        for epoch in range(self.epochs):
+            train_loss = self.train(self.train_iter, optimizer, criterion, self.batch_size)
+            break
+        
 
 
 if __name__ == "__main__":
-    # d = Data()
-    # d.test()
-    m = PatternModel()
-    m.train()
+    #d = Data()
+    #print(d[0])
+    t = Train()
+    t.run()
+    
