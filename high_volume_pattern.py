@@ -1,5 +1,6 @@
 import h5py
 import json
+import tqdm
 import time
 import random
 import pathlib
@@ -176,12 +177,11 @@ class Data(Dataset):
                     metas += meta
                     pred += y
                     label += [1 if _y > self.threshold else 0 for _y in y]
-                #break        
+                break        
         self.logger.info("Get Stock Data : {} patterns".format(len(stock_data)))
         self.data_len = len(stock_data)
         self.features = len(stock_data[0][0])
         self.num_meta = len(metas[0])
-        #TODO: ToTensor()
         self.stock_data = torch.tensor(stock_data, dtype=torch.float)
         self.metas = torch.tensor(metas, dtype=torch.float)
         self.pred = torch.tensor(pred, dtype=torch.float)
@@ -200,31 +200,37 @@ class Data(Dataset):
         return item
             
 
-def recall_m(y_true, y_pred):
-    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-    possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
-    recall = true_positives / (possible_positives + K.epsilon())
-    return recall
+def recall(y_true, y_pred):
+    assert len(y_true) == len(y_pred), "invalid length {} vs {}".format(len(y_true), len(y_pred))
+    ones, match = 0, 0
+    for t, p in zip(y_true, y_pred):
+        if t > 0.5:
+            ones = ones + 1
+            if p > 0.5:
+                match = match + 1
+    return match / (ones + 1e-10)
+
+def precision(y_true, y_pred):
+    assert len(y_true) == len(y_pred), "invalid length {} vs {}".format(len(y_true), len(y_pred))
+    pred_ones, match = 0, 0
+    for t, p in zip(y_true, y_pred):
+        if p > 0.5:
+            pred_ones = pred_ones + 1
+            if t > 0.5:
+                match = match + 1
+    return match / (pred_ones + 1e-10) 
 
 
-def precision_m(y_true, y_pred):
-    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-    predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
-    precision = true_positives / (predicted_positives + K.epsilon())
-    return precision
-
-
-def f1_m(y_true, y_pred):
-    precision = precision_m(y_true, y_pred)
-    recall = recall_m(y_true, y_pred)
-    return 2 * ((precision * recall) / (precision + recall + K.epsilon()))
+def f1_score(y_true, y_pred):
+    _precision = precision(y_true, y_pred)
+    _recall = recall(y_true, y_pred)
+    return 2 * ((_precision * _recall) / (_precision + _recall + 1e-10))
 
 
 class Encoder(nn.Module):
 
     def __init__(self, features, hid_dim, layers, dropout):
         super().__init__()
-
         self.rnn = nn.LSTM(features, hid_dim, layers, dropout = dropout)
 
     def forward(self, frame):
@@ -235,6 +241,7 @@ class Network(nn.Module):
 
     def __init__(self, encoder, num_meta, hid_dim, device):
         super().__init__()
+        
         self.encoder = encoder
         self.embedding = nn.Linear(num_meta, hid_dim)
         self.fc1 = nn.Linear(hid_dim * 2, hid_dim)
@@ -242,6 +249,7 @@ class Network(nn.Module):
         nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
         self.device = device
+
 
     def forward(self, frame, meta):
         hidden, _ = self.encoder(frame)
@@ -253,7 +261,8 @@ class Network(nn.Module):
 
 class Train:
 
-    def __init__(self, epochs=10, batch_size=4):
+    def __init__(self, epochs=10, batch_size=128):
+        self.logger = get_logger()
         self.data = Data()
         data_len = len(self.data)
         train_num = int(data_len * 0.8)
@@ -287,20 +296,65 @@ class Train:
         self.network.train()
 
         epoch_loss = 0
-        for i, batch in enumerate(iterator):
-            frame = batch["frame"].view(-1, self.batch_size, self.data.features).to(device)
-            meta = batch["meta"].to(device)
-            label = batch["label"].view(-1, 1).to(device)
+        
+        with tqdm.tqdm(total=len(iterator)) as t:
+            for i, batch in enumerate(iterator):
+                batch_size = batch["frame"].shape[0]
+                frame = batch["frame"].view(-1, batch_size, self.data.features).to(device)
+                meta = batch["meta"].to(device)
+                label = batch["label"].view(-1, 1).to(device)
 
-            output = self.network(frame, meta)
-            optimizer.zero_grad()
-            loss = criterion(output, label)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1)
-            optimizer.step()
-            epoch_loss += loss.item()
+                output = self.network(frame, meta)
+                optimizer.zero_grad()
+                loss = criterion(output, label)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1)
+                optimizer.step()
+                epoch_loss += loss.item()
+
+                t.set_postfix(loss='{:05.3f}'.format(epoch_loss / (i+1)))
+                t.update()
             
         return epoch_loss / len(iterator)
+
+    def evaluate(self, iterator, criterion, is_validate=True):
+        self.network.eval()
+        epoch_loss = 0
+        
+        predict = []
+        real = []
+        returns = []
+        with torch.no_grad():
+            for i, batch in enumerate(iterator):
+
+                batch_size = batch["frame"].shape[0]
+                frame = batch["frame"].view(-1, batch_size, self.data.features).to(device)
+                meta = batch["meta"].to(device)
+                label = batch["label"].to(device)
+                if not is_validate:
+                    _returns = batch["pred"]
+                    returns.extend(_returns.tolist())
+
+                real.extend(label.tolist())
+                
+                output = self.network(frame, meta)
+                output = output.squeeze()
+                pred = [1 if o > 0.5 else 0 for o in output]
+                predict.extend(pred)
+                loss = criterion(output, label)
+                epoch_loss += loss.item()
+        #print(predict, real)
+        self.logger.info("Validation. Prec: {}, recall: {}, f1: {}".format(
+            precision(real, predict), recall(real, predict), f1_score(real, predict)))
+        
+        if not is_validate:
+            pred_returns = [_return for buy, _return in zip(predict, returns) if buy > 0.5]
+            self.logger.info("Test")
+
+        
+        return epoch_loss / len(iterator)
+
+            
 
     def run(self):
         optimizer = optim.Adam(self.network.parameters())
@@ -308,6 +362,7 @@ class Train:
 
         for epoch in range(self.epochs):
             train_loss = self.train(self.train_iter, optimizer, criterion, self.batch_size)
+            vali_loss = self.evaluate(self.valid_iter, criterion)
             break
         
 
