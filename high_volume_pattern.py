@@ -1,3 +1,4 @@
+import csv
 import h5py
 import json
 import tqdm
@@ -63,6 +64,72 @@ kosdaq_price_interval = [
 ]
 
 
+class StockMetaData:
+
+    def __init__(self):
+        with open("data/fnguide_report.csv", "r") as fin:
+            reader = csv.DictReader(fin)
+            self.rows = list(reader)
+        self.preprocess()
+
+    def _get_stock_code(self, stockcode):
+        if stockcode.startswith("A"):
+            return stockcode[1:]
+        return stockcode
+
+    def _parse(self, row):
+        if not row.get("Total Assets") or not row.get("Profit")\
+                or not row.get("Gross Profit"):
+            return None
+        return {
+            "ta": np.log(1 + float(row.get("Total Assets"))),
+            "roa": float(row.get("Profit")) / float(row.get("Total Assets")),
+            "gpa": float(row.get("Gross Profit")) / float(row.get("Total Assets")),
+        }
+
+    def preprocess(self):
+        stock_info = {}
+        raw_data = {}
+        for row in self.rows:
+            #code = self._get_stock_code(row.get("Code"))
+            code = row.get("Code")
+            if not code:
+                continue
+            stock_info.setdefault(code, {}).update({
+                row.get("period"): self._parse(row),
+            })
+            raw_data.setdefault(code, []).append(row)
+        self.stock_info = stock_info
+        self.raw_data = raw_data
+
+    def get_market(self, stockcode):
+        #never mind time constraint
+        if stockcode not in self.raw_data or not self.raw_data[stockcode]:
+            return None
+        row = self.raw_data[stockcode][0]
+        return 1 if row.get("Market") == "KS" else 2
+
+
+    def _get_ym(self, ymd):
+        y = int(ymd[:4])
+        m = int(ymd[4:6])
+        m = m - 1
+        if m <= 2:
+            m = 12
+            y = y - 1
+        m = int(m / 3) * 3
+        return "{}{:02d}".format(y, m)
+
+    def get(self, stockcode, ymd, price=0.0):
+        ym = self._get_ym(ymd)
+        if stockcode not in self.stock_info or ym not in self.stock_info[stockcode]:
+            return None
+        if ym not in self.stock_info[stockcode] or not self.stock_info[stockcode][ym]:
+            return None
+
+        return list(self.stock_info[stockcode][ym].values())
+
+
 
 class Data(Dataset):
 
@@ -76,18 +143,12 @@ class Data(Dataset):
         self.window = 7
         assert self.barrier > 0, "target inference"
 
-        #with open("data/stock_meta.json", "r") as fin:
-        #    self.stock_meta = json.load(fin)
-        #    self.logger.info("stock meta info loaded {}".format(len(self.stock_meta)))
-
         self.transaction_fee = 0.0035
         self.threshold = 0.003
-        
+
+        self.stock_meta = StockMetaData()
+
         self.load()
-        
-    def get_market_info(self, stock_code):
-        stock_info = self.stock_meta.get(stock_code, {})
-        return stock_info.get("marketkind", None)
 
     def get_slippage(self, price, market):
         """
@@ -102,6 +163,12 @@ class Data(Dataset):
             if price > p:
                 return slip
         return 0
+
+    def _sort_time(self, target_list, time_list):
+        merge_list = list(zip(target_list, time_list))
+        merge_list = sorted(merge_list, key=lambda x: x[1])
+        merge_list = [m[0] for m in merge_list]
+        return merge_list
 
     def load(self):
         """
@@ -124,21 +191,27 @@ class Data(Dataset):
             for stockcode in fin.keys():
                 if self.verbose:
                     self.logger.info(stockcode)
-                #if stockcode not in self.stock_meta:
-                #    continue
+
                 datetimes = set(fin[stockcode]["dates"][:])
                 for _datetime in datetimes:
-                    opens = [i for i, p in zip(fin[stockcode]["prices"][:], fin[stockcode]["dates"][:]) if p == _datetime]
-                    #opens = [i for i, p in zip(fin[stockcode]["opens"][:], fin[stockcode]["dates"][:]) if p == _datetime]
-                    #highs = [i for i, p in zip(fin[stockcode]["highs"][:], fin[stockcode]["dates"][:]) if p == _datetime]
-                    #lows = [i for i, p in zip(fin[stockcode]["lows"][:], fin[stockcode]["dates"][:]) if p == _datetime]
-                    #closes = [i for i, p in zip(fin[stockcode]["closes"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+
+                    meta_info = self.stock_meta.get(stockcode, str(_datetime))
+                    if meta_info is None:
+                        continue
+
+                    opens = [i for i, p in zip(fin[stockcode]["opens"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    highs = [i for i, p in zip(fin[stockcode]["highs"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    lows = [i for i, p in zip(fin[stockcode]["lows"][:], fin[stockcode]["dates"][:]) if p == _datetime]
+                    closes = [i for i, p in zip(fin[stockcode]["closes"][:], fin[stockcode]["dates"][:]) if p == _datetime]
                     volumes = [i for i, p in zip(fin[stockcode]["volumes"][:], fin[stockcode]["dates"][:]) if p == _datetime]
                     minutes = [i for i, p in zip(fin[stockcode]["minutes"][:], fin[stockcode]["dates"][:]) if
                                p == _datetime]
 
-                    if len(minutes) < 60:
-                        continue
+                    opens = self._sort_time(opens, minutes)
+                    highs = self._sort_time(highs, minutes)
+                    lows = self._sort_time(lows, minutes)
+                    closes = self._sort_time(closes, minutes)
+                    volumes = self._sort_time(volumes, minutes)
 
                     #ibss = []
                     #for o, h, l, c in zip(opens, highs, lows, closes):
@@ -149,19 +222,16 @@ class Data(Dataset):
                     # for X
                     for step in range(time_len - self.window - self.barrier):
                         _opens = opens[step:step+self.window]
-                        #_highs = highs[step:step+self.window]
-                        #_lows = lows[step:step+self.window]
-                        #_closes = closes[step:step+self.window]
+                        _highs = highs[step:step+self.window]
+                        _lows = lows[step:step+self.window]
+                        _closes = closes[step:step+self.window]
                         _volumes = volumes[step:step+self.window]
 
-                        frame = [[o, v] for o, v  in zip(_opens, _volumes)]
+                        frame = [[o, h, l, c, v] for o, v  in zip(_opens, _highs, _lows, _closes, _volumes)]
                         frames.append(frame)
-                        #TODO: add report info
-                        meta.append([1, 1])
+                        meta.append(meta_info)
 
-                    #marketkind = self.get_market_info(stockcode)
-                    marketkind = 1
-                    
+                    marketkind = self.stock_meta.get_market(stockcode)
                     # for y
                     for step in range(self.window, time_len - self.barrier):
                         buy_slippage = self.get_slippage(opens[step], marketkind)
@@ -177,7 +247,7 @@ class Data(Dataset):
                     metas += meta
                     pred += y
                     label += [1 if _y > self.threshold else 0 for _y in y]
-                break        
+                #break
         self.logger.info("Get Stock Data : {} patterns".format(len(stock_data)))
         self.data_len = len(stock_data)
         self.features = len(stock_data[0][0])
@@ -186,7 +256,7 @@ class Data(Dataset):
         self.metas = torch.tensor(metas, dtype=torch.float)
         self.pred = torch.tensor(pred, dtype=torch.float)
         self.label = torch.tensor(label, dtype=torch.float)
-    
+
     def __len__(self):
         return self.data_len
 
@@ -198,7 +268,7 @@ class Data(Dataset):
             "label": self.label[index]
         }
         return item
-            
+
 
 def recall(y_true, y_pred):
     assert len(y_true) == len(y_pred), "invalid length {} vs {}".format(len(y_true), len(y_pred))
@@ -218,7 +288,7 @@ def precision(y_true, y_pred):
             pred_ones = pred_ones + 1
             if t > 0.5:
                 match = match + 1
-    return match / (pred_ones + 1e-10) 
+    return match / (pred_ones + 1e-10)
 
 
 def f1_score(y_true, y_pred):
@@ -241,7 +311,7 @@ class Network(nn.Module):
 
     def __init__(self, encoder, num_meta, hid_dim, device):
         super().__init__()
-        
+
         self.encoder = encoder
         self.embedding = nn.Linear(num_meta, hid_dim)
         self.fc1 = nn.Linear(hid_dim * 2, hid_dim)
@@ -283,7 +353,7 @@ class Train:
         print(self.network)
         self.epochs = epochs
         self.batch_size = batch_size
-        
+
     @staticmethod
     def init_weights(m):
         for name, param in m.named_parameters():
@@ -296,7 +366,7 @@ class Train:
         self.network.train()
 
         epoch_loss = 0
-        
+
         with tqdm.tqdm(total=len(iterator)) as t:
             for i, batch in enumerate(iterator):
                 batch_size = batch["frame"].shape[0]
@@ -314,13 +384,13 @@ class Train:
 
                 t.set_postfix(loss='{:05.3f}'.format(epoch_loss / (i+1)))
                 t.update()
-            
+
         return epoch_loss / len(iterator)
 
     def evaluate(self, iterator, criterion, is_validate=True):
         self.network.eval()
         epoch_loss = 0
-        
+
         predict = []
         real = []
         returns = []
@@ -336,7 +406,7 @@ class Train:
                     returns.extend(_returns.tolist())
 
                 real.extend(label.tolist())
-                
+
                 output = self.network(frame, meta)
                 output = output.squeeze()
                 pred = [1 if o > 0.5 else 0 for o in output]
@@ -346,15 +416,14 @@ class Train:
         #print(predict, real)
         self.logger.info("Validation. Prec: {}, recall: {}, f1: {}".format(
             precision(real, predict), recall(real, predict), f1_score(real, predict)))
-        
+
         if not is_validate:
             pred_returns = [_return for buy, _return in zip(predict, returns) if buy > 0.5]
-            self.logger.info("Test")
+            self.logger.info("Test returns: ".format(sum(pred_returns) / len(pred_returns)))
 
-        
         return epoch_loss / len(iterator)
 
-            
+
 
     def run(self):
         optimizer = optim.Adam(self.network.parameters())
@@ -364,7 +433,7 @@ class Train:
             train_loss = self.train(self.train_iter, optimizer, criterion, self.batch_size)
             vali_loss = self.evaluate(self.valid_iter, criterion)
             break
-        
+
 
 
 if __name__ == "__main__":
@@ -372,4 +441,4 @@ if __name__ == "__main__":
     #print(d[0])
     t = Train()
     t.run()
-    
+
