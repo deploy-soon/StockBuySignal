@@ -11,6 +11,7 @@ from os.path import join as pjoin
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader, random_split
+import torch.nn.functional as F
 
 from misc import get_logger
 
@@ -45,6 +46,7 @@ def mfi(highs, lows, closes, volumes):
     MR = PMF / (NMF + 1e-10)
     MFI = MR / (1 + MR)
     return MFI
+
 
 kospi_price_interval = [
     (500000, 1000),
@@ -127,7 +129,7 @@ class StockMetaData:
         if ym not in self.stock_info[stockcode] or not self.stock_info[stockcode][ym]:
             return None
 
-        return list(self.stock_info[stockcode][ym].values())
+        return self.stock_info[stockcode][ym]
 
 
 
@@ -144,7 +146,7 @@ class Data(Dataset):
         assert self.barrier > 0, "target inference"
 
         self.transaction_fee = 0.0035
-        self.threshold = 0.003
+        self.threshold = 0.0001
 
         self.stock_meta = StockMetaData()
 
@@ -187,8 +189,9 @@ class Data(Dataset):
         }
         """
         stock_data, metas, pred, label = [], [], [], []
+        self.logger.info("Start Load {}".format(self.path))
         with h5py.File(self.path, "r") as fin:
-            for stockcode in fin.keys():
+            for stockcode in tqdm.tqdm(fin.keys()):
                 if self.verbose:
                     self.logger.info(stockcode)
 
@@ -226,8 +229,15 @@ class Data(Dataset):
                         _lows = lows[step:step+self.window]
                         _closes = closes[step:step+self.window]
                         _volumes = volumes[step:step+self.window]
+                        fo = _opens[0] # first open
+                        _opens = [(o - fo) / fo for o in _opens]
+                        _highs = [(h - fo) / fo for h in _highs]
+                        _lows = [(l - fo) / fo for l in _lows]
+                        _closes = [(c - fo) / fo for c in _closes]
+                        _max, _min = max(_volumes), min(_volumes)
+                        _volumes = [(v-_min)/(_max-_min) for v in _volumes]
 
-                        frame = [[o, h, l, c, v] for o, v  in zip(_opens, _highs, _lows, _closes, _volumes)]
+                        frame = [[o, h, l, c, v] for o, h, l, c, v in zip(_opens, _highs, _lows, _closes, _volumes)]
                         frames.append(frame)
                         meta.append(meta_info)
 
@@ -235,10 +245,8 @@ class Data(Dataset):
                     # for y
                     for step in range(self.window, time_len - self.barrier):
                         buy_slippage = self.get_slippage(opens[step], marketkind)
-                        #sell_slippage = self.get_slippage(closes[step + self.barrier - 1], marketkind)
-                        sell_slippage = 1
-                        #_y = (closes[step + self.barrier - 1] - opens[step] - buy_slippage - sell_slippage) / opens[step]
-                        _y = (opens[step + self.barrier - 1] - opens[step] - buy_slippage - sell_slippage) / opens[step]
+                        sell_slippage = self.get_slippage(closes[step + self.barrier - 1], marketkind)
+                        _y = (closes[step + self.barrier - 1] - opens[step] - buy_slippage - sell_slippage) / opens[step]
                         _y = _y - self.transaction_fee
                         y.append(_y)
 
@@ -249,13 +257,32 @@ class Data(Dataset):
                     label += [1 if _y > self.threshold else 0 for _y in y]
                 #break
         self.logger.info("Get Stock Data : {} patterns".format(len(stock_data)))
+        self.logger.info("class 1: {}, class 0: {}".format(sum(label), len(label) - sum(label)))
         self.data_len = len(stock_data)
         self.features = len(stock_data[0][0])
         self.num_meta = len(metas[0])
+
+        metas = self._meta_normalize(metas)
         self.stock_data = torch.tensor(stock_data, dtype=torch.float)
         self.metas = torch.tensor(metas, dtype=torch.float)
         self.pred = torch.tensor(pred, dtype=torch.float)
         self.label = torch.tensor(label, dtype=torch.float)
+        print(self.stock_data[0])
+        print(self.metas[0])
+        print(self.pred[0])
+
+    def _meta_normalize(self, meta_info):
+        keys = list(meta_info[0].keys())
+        value_list = {}
+        for key in keys:
+            values = [v[key] for v in meta_info]
+            _min, _max, _mean, _std = min(values), max(values), sum(values) / len(values), np.std(values)
+            self.logger.info("data {} range: {} ~ {}, mean: {} std: {}".format(key, _min, _max, _mean, _std))
+
+            values = [(v-_mean) / (_std + 1e-10) for v in values]
+            value_list[key] = values
+        res = [list(v) for v in zip(*(value_list.values()))]
+        return res
 
     def __len__(self):
         return self.data_len
@@ -309,23 +336,23 @@ class Encoder(nn.Module):
 
 class Network(nn.Module):
 
-    def __init__(self, encoder, num_meta, hid_dim, device):
+    def __init__(self, encoder, num_meta, enc_hid_dim, hid_dim, device):
         super().__init__()
 
         self.encoder = encoder
         self.embedding = nn.Linear(num_meta, hid_dim)
-        self.fc1 = nn.Linear(hid_dim * 2, hid_dim)
-        self.fc2 = nn.Linear(hid_dim, 1)
-        nn.init.xavier_uniform_(self.fc2.weight)
-        nn.init.zeros_(self.fc2.bias)
+        self.fc1 = nn.Linear(hid_dim + enc_hid_dim, 128)
+        self.fc2 = nn.Linear(128, hid_dim)
+        self.fc3 = nn.Linear(hid_dim, 1)
         self.device = device
 
 
     def forward(self, frame, meta):
         hidden, _ = self.encoder(frame)
-        emb = self.embedding(meta)
-        x = self.fc1(torch.cat((hidden[1], emb), dim=1))
-        output = torch.sigmoid(self.fc2(x))
+        emb = F.relu(self.embedding(meta))
+        x = F.relu(self.fc1(torch.cat((hidden[1], emb), dim=1)))
+        x = F.relu(self.fc2(x))
+        output = torch.sigmoid(self.fc3(x))
         return output
 
 
@@ -343,11 +370,12 @@ class Train:
         self.valid_iter = DataLoader(valid, batch_size = batch_size, shuffle=True, num_workers=4)
         self.test_iter = DataLoader(test, batch_size = batch_size, shuffle=True, num_workers=4)
         self.encoder = Encoder(features=self.data.features,
-                               hid_dim = 64,
+                               hid_dim = 256,
                                layers=2,
-                               dropout=0.7)
+                               dropout=0.5)
         self.network = Network(encoder=self.encoder,
                                num_meta=self.data.num_meta,
+                               enc_hid_dim=256,
                                hid_dim=64,
                                device=device).to(device)
         print(self.network)
@@ -357,7 +385,10 @@ class Train:
     @staticmethod
     def init_weights(m):
         for name, param in m.named_parameters():
-            nn.init.uniform_(param.data, -0.1, 0.1)
+            if 'weight' in name:
+                nn.init.normal_(param.data, mean=0, std=0.01)
+            else:
+                nn.init.constant_(param.data, 0)
 
     def count_parameters(self, model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -409,31 +440,38 @@ class Train:
 
                 output = self.network(frame, meta)
                 output = output.squeeze()
-                pred = [1 if o > 0.5 else 0 for o in output]
+                pred = [1 if o > 0.18 else 0 for o in output]
                 predict.extend(pred)
                 loss = criterion(output, label)
                 epoch_loss += loss.item()
-        #print(predict, real)
-        self.logger.info("Validation. Prec: {}, recall: {}, f1: {}".format(
-            precision(real, predict), recall(real, predict), f1_score(real, predict)))
+                if i % 200 == 199:
+                    print(output)
 
         if not is_validate:
-            pred_returns = [_return for buy, _return in zip(predict, returns) if buy > 0.5]
-            self.logger.info("Test returns: ".format(sum(pred_returns) / len(pred_returns)))
+            self.logger.info("buy {} cases among {}".format(sum(predict), len(predict) - sum(predict)))
+            pred_returns = [_return for buy, _return in zip(predict, returns) if buy > 0.18]
+            initial_return = 1.0
+            for _returns in pred_returns:
+                initial_return *= (1+_returns)
+            self.logger.info("Test returns: {}, overall: {}".format(sum(pred_returns) / len(pred_returns), initial_return))
+        else:
+            self.logger.info("Validation. Prec: {}, recall: {}, f1: {}".format(
+                precision(real, predict), recall(real, predict), f1_score(real, predict)))
 
         return epoch_loss / len(iterator)
 
 
 
     def run(self):
-        optimizer = optim.Adam(self.network.parameters())
+        self.logger.info("Model trainable parameters: {}".format(self.count_parameters(self.network)))
+        self.network.apply(self.init_weights)
+        optimizer = optim.Adam(self.network.parameters(), lr=0.0001)
         criterion = nn.BCELoss()
 
         for epoch in range(self.epochs):
             train_loss = self.train(self.train_iter, optimizer, criterion, self.batch_size)
             vali_loss = self.evaluate(self.valid_iter, criterion)
-            break
-
+        _ = self.evaluate(self.test_iter, criterion, is_validate=False)
 
 
 if __name__ == "__main__":
