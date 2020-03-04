@@ -52,7 +52,7 @@ def get_cci(highs, lows, closes):
 
 def get_atr(highs, lows, closes, N = 14):
     true_ranges = [0.0]
-    for prev_close, low, high in zip(closes, lows[1:], high[1:]):
+    for prev_close, low, high in zip(closes, lows[1:], highs[1:]):
         true_ranges.append(max(high-low, abs(high-prev_close), abs(low-prev_close)))
     atr_0 = sum(true_ranges[:N]) / N
     atrs = [atr_0]
@@ -100,7 +100,7 @@ def get_ibs(opens, highs, lows, closes):
 def get_rsi(opens, N=14):
     rsis = [0.0] * N
     for i in range(N, len(opens)):
-        returns = [(prices[j+1]-prices[j]) / prices[j] for j in range(i-N, i)]
+        returns = [(opens[j+1]-opens[j]) / opens[j] for j in range(i-N, i)]
         u = [max(r, 0) for r in returns]
         d = [-min(r, 0) for r in returns]
         au, ad = sum(u), sum(d)
@@ -197,9 +197,22 @@ class Data(Dataset):
         macds = get_macd(opens)
         ccis = get_cci(highs, lows, closes)
         atrs = get_atr(highs, lows, closes)
+        ma_5 = get_ma(closes, 5)
+        ma_10 = get_ma(closes, 10)
+        ema_20 = get_ema(closes, 20)
+        boll = get_bollinger(opens, 20)
+        roc = get_roc(closes)
+        wvad = get_wvad(opens, highs, lows, closes, volumes)
+        ibs = get_ibs(opens, highs, lows, closes)
+        rsi = get_rsi(opens)
+
         start_point = 26
-        assert time_len == len(macds) == len(ccis) == len(atrs)
-        windows = list(zip(macds, ccis, atrs))
+        assert time_len == len(macds) == len(ccis) == len(atrs) == len(ma_5)\
+            == len(ma_10) == len(ema_20) == len(boll) == len(roc) == len(wvad)\
+            == len(ibs) == len(rsi)
+
+        windows = list(zip(macds, ccis, atrs, ma_5, ma_10, ema_20, boll, roc,
+                           wvad, ibs, rsi))
 
         for step in range(start_point, time_len - self.window - self.barrier):
             window_dates = dates[step: step + self.window + self.barrier]
@@ -251,10 +264,9 @@ class Data(Dataset):
 
     def __getitem__(self, index):
         item = {
-            "frame": self.stock_data[index],
-            "meta": self.metas[index],
-            "pred": self.pred[index],
-            "label": self.label[index]
+            "frame": self.frames[index],
+            "pred": self.preds[index],
+            "label": self.labels[index]
         }
         return item
 
@@ -298,7 +310,7 @@ class Encoder(nn.Module):
 
 class Network(nn.Module):
 
-    def __init__(self, encoder, num_meta, enc_hid_dim, hid_dim, device):
+    def __init__(self, encoder, enc_hid_dim, hid_dim, device):
         super().__init__()
 
         self.encoder = encoder
@@ -310,7 +322,7 @@ class Network(nn.Module):
         self.device = device
 
 
-    def forward(self, frame, meta):
+    def forward(self, frame):
         hidden, _ = self.encoder(frame)
         #emb = F.relu(self.embedding(meta))
         #x = F.relu(self.fc1(torch.cat((hidden[1], emb), dim=1)))
@@ -324,7 +336,7 @@ class Train:
 
     def __init__(self, epochs=10, batch_size=128):
         self.logger = get_logger()
-        self.data = Data()
+        self.data = Data("005930")
         data_len = len(self.data)
         train_num = int(data_len * 0.8)
         valid_num = int(data_len * 0.1)
@@ -338,7 +350,6 @@ class Train:
                                layers=2,
                                dropout=0.5)
         self.network = Network(encoder=self.encoder,
-                               num_meta=self.data.num_meta,
                                enc_hid_dim=256,
                                hid_dim=64,
                                device=device).to(device)
@@ -366,10 +377,9 @@ class Train:
             for i, batch in enumerate(iterator):
                 batch_size = batch["frame"].shape[0]
                 frame = batch["frame"].view(-1, batch_size, self.data.features).to(device)
-                meta = batch["meta"].to(device)
                 label = batch["label"].view(-1, 1).to(device)
 
-                output = self.network(frame, meta)
+                output = self.network(frame)
                 optimizer.zero_grad()
                 loss = criterion(output, label)
                 loss.backward()
@@ -394,7 +404,6 @@ class Train:
 
                 batch_size = batch["frame"].shape[0]
                 frame = batch["frame"].view(-1, batch_size, self.data.features).to(device)
-                meta = batch["meta"].to(device)
                 label = batch["label"].to(device)
                 if not is_validate:
                     _returns = batch["pred"]
@@ -402,7 +411,7 @@ class Train:
 
                 real.extend(label.tolist())
 
-                output = self.network(frame, meta)
+                output = self.network(frame)
                 output = output.squeeze()
                 pred = [1 if o > 0.18 else 0 for o in output]
                 predict.extend(pred)
@@ -440,8 +449,8 @@ class Train:
 
 
 if __name__ == "__main__":
-    d = Data("005930")
+    #d = Data("005930")
     #print(d[0])
-    #t = Train(epochs=50)
-    #t.run()
+    t = Train(epochs=50)
+    t.run()
 
