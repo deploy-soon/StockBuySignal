@@ -194,17 +194,17 @@ class Data(Dataset):
         closes = [float(row["close"]) for row in minute_rows]
         volumes = [float(row["volume"]) for row in minute_rows]
 
-        macds = get_macd(opens)
-        ccis = get_cci(highs, lows, closes)
-        atrs = get_atr(highs, lows, closes)
-        ma_5 = get_ma(closes, 5)
-        ma_10 = get_ma(closes, 10)
-        ema_20 = get_ema(closes, 20)
-        boll = get_bollinger(opens, 20)
-        roc = get_roc(closes)
-        wvad = get_wvad(opens, highs, lows, closes, volumes)
-        ibs = get_ibs(opens, highs, lows, closes)
-        rsi = get_rsi(opens)
+        macds = self.normalize(get_macd(opens))
+        ccis = self.normalize(get_cci(highs, lows, closes))
+        atrs = self.normalize(get_atr(highs, lows, closes))
+        ma_5 = self.normalize(get_ma(closes, 5))
+        ma_10 = self.normalize(get_ma(closes, 10))
+        ema_20 = self.normalize(get_ema(closes, 20))
+        boll = self.normalize(get_bollinger(opens, 20))
+        roc = self.normalize(get_roc(closes))
+        wvad = self.normalize(get_wvad(opens, highs, lows, closes, volumes))
+        ibs = self.normalize(get_ibs(opens, highs, lows, closes))
+        rsi = self.normalize(get_rsi(opens))
 
         start_point = 26
         assert time_len == len(macds) == len(ccis) == len(atrs) == len(ma_5)\
@@ -243,6 +243,15 @@ class Data(Dataset):
         self.labels = torch.tensor(labels, dtype=torch.float)
         print(self.frames[0])
         print(self.preds[0])
+
+    def normalize(self, values):
+        _min, _max = min(values), max(values)
+        _mean, _std = sum(values) / len(values), np.std(values)
+        self.logger.info("range: {:.4f}~{:.4f}, mean: {:.4f} std: {:.4f}"
+                         .format(_min, _max, _mean, _std))
+
+        values = [(v-_mean) / (_std + 1e-10) for v in values]
+        return values
 
     def _meta_normalize(self, meta_info):
         keys = list(meta_info[0].keys())
@@ -346,11 +355,11 @@ class Train:
         self.valid_iter = DataLoader(valid, batch_size = batch_size, shuffle=True, num_workers=4)
         self.test_iter = DataLoader(test, batch_size = batch_size, shuffle=True, num_workers=4)
         self.encoder = Encoder(features=self.data.features,
-                               hid_dim = 256,
+                               hid_dim = 64,
                                layers=2,
-                               dropout=0.5)
+                               dropout=0.3)
         self.network = Network(encoder=self.encoder,
-                               enc_hid_dim=256,
+                               enc_hid_dim=64,
                                hid_dim=64,
                                device=device).to(device)
         print(self.network)
@@ -413,7 +422,7 @@ class Train:
 
                 output = self.network(frame)
                 output = output.squeeze()
-                pred = [1 if o > 0.18 else 0 for o in output]
+                pred = [1 if o > 0.01 else 0 for o in output]
                 predict.extend(pred)
                 loss = criterion(output, label)
                 epoch_loss += loss.item()
@@ -439,7 +448,7 @@ class Train:
     def run(self):
         self.logger.info("Model trainable parameters: {}".format(self.count_parameters(self.network)))
         self.network.apply(self.init_weights)
-        optimizer = optim.Adam(self.network.parameters(), lr=0.0001)
+        optimizer = optim.Adam(self.network.parameters(), lr=0.005)
         criterion = nn.BCELoss()
 
         for epoch in range(self.epochs):
