@@ -41,9 +41,9 @@ def rsi(prices):
 def mfi(highs, lows, closes, volumes):
     typical_prices = [(high + low + close) / 3 for high, low, close in zip(highs, lows, closes)]
     MF = [volume * tp for volume, tp in zip(volumes, typical_prices)]
-    PMF = [MF[i+1] for i in range(len(typical_prices)) if typical_prices[i] < typical_prices[i+1]]
-    NMF = [MF[i+1] for i in range(len(typical_prices)) if typical_prices[i] > typical_prices[i+1]]
-    MR = PMF / (NMF + 1e-10)
+    PMF = [MF[i+1] for i in range(len(typical_prices)-1) if typical_prices[i] < typical_prices[i+1]]
+    NMF = [MF[i+1] for i in range(len(typical_prices)-1) if typical_prices[i] > typical_prices[i+1]]
+    MR = sum(PMF) / (sum(NMF) + 1e-10)
     MFI = MR / (1 + MR)
     return MFI
 
@@ -216,19 +216,37 @@ class Data(Dataset):
                     closes = self._sort_time(closes, minutes)
                     volumes = self._sort_time(volumes, minutes)
 
-                    #ibss = []
-                    #for o, h, l, c in zip(opens, highs, lows, closes):
-                    #    ibss.append(ibs(o, h, l, c))
+                    ibss = []
+                    for o, h, l, c in zip(opens, highs, lows, closes):
+                        ibss.append(ibs(o, h, l, c))
                     time_len = len(opens)
                     frames, meta, y = [], [], []
 
+
+                    feature_window = 9
+                    rsis = []
+                    mfis = []
+                    for step in range(time_len - feature_window):
+                        _opens = opens[step:step+feature_window]
+                        _highs = highs[step:step+feature_window]
+                        _lows = lows[step:step+feature_window]
+                        _closes = closes[step:step+feature_window]
+                        _volumes = volumes[step:step+feature_window]
+                        rsis.append(rsi(_opens))
+                        mfis.append(mfi(_highs, _lows, _closes, _volumes))
+
                     # for X
-                    for step in range(time_len - self.window - self.barrier):
+                    for step in range(time_len - self.window - self.barrier - feature_window):
+                        _rsis = rsis[step:step+self.window]
+                        _mfis = mfis[step:step+self.window]
+                        step = step + feature_window
                         _opens = opens[step:step+self.window]
                         _highs = highs[step:step+self.window]
                         _lows = lows[step:step+self.window]
                         _closes = closes[step:step+self.window]
                         _volumes = volumes[step:step+self.window]
+                        _ibss = ibss[step:step+self.window]
+
                         fo = _opens[0] # first open
                         _opens = [(o - fo) / fo for o in _opens]
                         _highs = [(h - fo) / fo for h in _highs]
@@ -237,13 +255,15 @@ class Data(Dataset):
                         _max, _min = max(_volumes), min(_volumes)
                         _volumes = [(v-_min)/(_max-_min) for v in _volumes]
 
-                        frame = [[o, h, l, c, v] for o, h, l, c, v in zip(_opens, _highs, _lows, _closes, _volumes)]
+                        frame = [[o, h, l, c, v, i, r, m] for o, h, l, c, v, i, r, m in
+                                 zip(_opens, _highs, _lows, _closes, _volumes, _ibss, _rsis, _mfis)]
                         frames.append(frame)
                         meta.append(meta_info)
 
                     marketkind = self.stock_meta.get_market(stockcode)
                     # for y
-                    for step in range(self.window, time_len - self.barrier):
+                    for step in range(self.window, time_len - self.barrier - feature_window):
+                        step = step + feature_window
                         buy_slippage = self.get_slippage(opens[step], marketkind)
                         sell_slippage = self.get_slippage(closes[step + self.barrier - 1], marketkind)
                         _y = (closes[step + self.barrier - 1] - opens[step] - buy_slippage - sell_slippage) / opens[step]
@@ -276,8 +296,10 @@ class Data(Dataset):
         value_list = {}
         for key in keys:
             values = [v[key] for v in meta_info]
-            _min, _max, _mean, _std = min(values), max(values), sum(values) / len(values), np.std(values)
-            self.logger.info("data {} range: {} ~ {}, mean: {} std: {}".format(key, _min, _max, _mean, _std))
+            _min, _max = min(values), max(values)
+            _mean, _std = sum(values) / len(values), np.std(values)
+            self.logger.info("data {} range: {:.4f} ~ {:.4f}, mean: {:.4f} std: {:.4f}"
+                             .format(key, _min, _max, _mean, _std))
 
             values = [(v-_mean) / (_std + 1e-10) for v in values]
             value_list[key] = values
@@ -340,17 +362,19 @@ class Network(nn.Module):
         super().__init__()
 
         self.encoder = encoder
-        self.embedding = nn.Linear(num_meta, hid_dim)
-        self.fc1 = nn.Linear(hid_dim + enc_hid_dim, 128)
-        self.fc2 = nn.Linear(128, hid_dim)
+        #self.embedding = nn.Linear(num_meta, hid_dim)
+        #self.fc1 = nn.Linear(hid_dim + e, nc_hid_dim, 256)
+        self.fc1 = nn.Linear(enc_hid_dim, 256)
+        self.fc2 = nn.Linear(256, hid_dim)
         self.fc3 = nn.Linear(hid_dim, 1)
         self.device = device
 
 
     def forward(self, frame, meta):
         hidden, _ = self.encoder(frame)
-        emb = F.relu(self.embedding(meta))
-        x = F.relu(self.fc1(torch.cat((hidden[1], emb), dim=1)))
+        #emb = F.relu(self.embedding(meta))
+        #x = F.relu(self.fc1(torch.cat((hidden[1], emb), dim=1)))
+        x = F.relu(self.fc1(hidden[1]))
         x = F.relu(self.fc2(x))
         output = torch.sigmoid(self.fc3(x))
         return output
@@ -444,8 +468,8 @@ class Train:
                 predict.extend(pred)
                 loss = criterion(output, label)
                 epoch_loss += loss.item()
-                if i % 200 == 199:
-                    print(output)
+                #if i % 200 == 199:
+                #    print(output)
 
         if not is_validate:
             self.logger.info("buy {} cases among {}".format(sum(predict), len(predict) - sum(predict)))
@@ -453,14 +477,15 @@ class Train:
             initial_return = 1.0
             for _returns in pred_returns:
                 initial_return *= (1+_returns)
-            self.logger.info("Test returns: {}, overall: {}".format(sum(pred_returns) / len(pred_returns), initial_return))
+            self.logger.info("Test returns: {:.4f}, overall: {:.4f}"
+                             .format(sum(pred_returns) / len(pred_returns), initial_return))
         else:
-            self.logger.info("Validation. Prec: {}, recall: {}, f1: {}".format(
-                precision(real, predict), recall(real, predict), f1_score(real, predict)))
+            self.logger.info("Validation. Prec: {:.4f}, recall: {:.4f}, f1: {:.4f}"
+                             .format(precision(real, predict),
+                                     recall(real, predict),
+                                     f1_score(real, predict)))
 
         return epoch_loss / len(iterator)
-
-
 
     def run(self):
         self.logger.info("Model trainable parameters: {}".format(self.count_parameters(self.network)))
@@ -477,6 +502,6 @@ class Train:
 if __name__ == "__main__":
     #d = Data()
     #print(d[0])
-    t = Train()
+    t = Train(epochs=50)
     t.run()
 
