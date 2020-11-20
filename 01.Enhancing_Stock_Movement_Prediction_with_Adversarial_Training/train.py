@@ -21,11 +21,35 @@ parser = argparse.ArgumentParser(description="Train Step",
 
 parser.add_argument('--epochs', type=int, default=100)
 parser.add_argument('--batch_size', type=int, default=1024)
-parser.add_argument('--lr', type=int, default=0.0001)
+parser.add_argument('--lr', type=int, default=0.001)
 parser.add_argument('--lags', type=int, default=5)
 parser.add_argument('--stock_code', type=str)
-parser.add_argument('--verbose', type=str2bool, default=True)
+parser.add_argument('--verbose', type=str2bool, default=False)
 args = parser.parse_args()
+
+
+def fgsm_attach(feature, feature_grad, epsilon=1e-3):
+    # TODO: feature_grad.sign()
+    # batch L2 normalization
+    feature_grad = F.normalize(feature_grad, dim=0, p=2)
+    perturbed_feature = feature + epsilon * feature_grad
+    return perturbed_feature
+
+
+def get_Acc(preds, trues):
+    preds = [1. if pred > 0.5 else 0. for pred in preds]
+    score = [p == t for p, t in zip(preds, trues)]
+    return sum(score) / (len(score) + 1e-8)
+
+def get_MCC(preds, trues):
+    preds = [1. if pred > 0.5 else 0. for pred in preds]
+
+    TP = sum([p*t for p, t in zip(preds, trues)])
+    TN = sum([(1-p)*(1-t) for p, t in zip(preds, trues)])
+    FP = sum([p*(1-t) for p, t in zip(preds, trues)])
+    FN = sum([(1-p)*t for p, t in zip(preds, trues)])
+    MCC = (TP*TN - FP*FN) / np.sqrt((TP+FP)*(TP+FN)*(TN+FP)*(TN+FN))
+    return MCC
 
 
 class Train:
@@ -33,6 +57,7 @@ class Train:
     def __init__(self, args, dataset=None, model_cls=None):
         self.epochs = args.epochs
         self.verbose = args.verbose
+        self.epsilon = 0.001
 
         if dataset is None:
             dataset = TrainDataset(stock_code=args.stock_code,
@@ -68,26 +93,42 @@ class Train:
         for batch, (X, y) in enumerate(self.train_loader):
             X = X.to(device)
             y = y.to(device)
-            self.optimizer.zero_grad()
-            score = self.model(X)
+            score, feature = self.model(X)
             loss = criterion(score, y)
 
+            self.optimizer.zero_grad()
+            feature_grad = torch.autograd.grad(loss, [feature],
+                                               retain_graph=True)[0]
+
+            perturbed_feature = fgsm_attach(feature, feature_grad,
+                                            epsilon=self.epsilon)
+            adv_score = self.model.perturbed_forward(perturbed_feature)
+            adv_loss = criterion(adv_score, y)
+            loss = loss + adv_loss
             loss.backward()
+
             self.optimizer.step()
-            total_loss += loss.item()
+            total_loss += loss.item() * X.size(0)
         total_loss /= self.train_num
         return total_loss
 
     def validate(self, epoch, loss_func):
         self.model.eval()
         total_loss = 0.0
+        preds, trues = [], []
         for batch, (X, y) in enumerate(self.vali_loader):
             X = X.to(device)
             y = y.to(device)
-            score = self.model(X)
+            score, _ = self.model(X)
+            trues += y.tolist()
+            preds += score.tolist()
             loss = loss_func(score, y)
-            total_loss += loss.item()
+            total_loss += loss.item() * X.size(0)
         total_loss /= self.vali_num
+
+        template = "LOSS: {:.4}, ACC: {:.4}, MCC: {:.4}"
+        print(template.format(total_loss, get_Acc(preds, trues),
+                              get_MCC(preds, trues)))
         return total_loss
 
     def run(self):

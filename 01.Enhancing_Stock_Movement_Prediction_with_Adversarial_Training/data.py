@@ -82,7 +82,7 @@ class TrainDataset(Dataset):
             if y[pivot-1] >= 0.0055:
                 ys.append(1.)
             elif y[pivot-1] <= -0.005:
-                ys.append(-1.)
+                ys.append(0.)
             else:
                 continue
             Xs.append(X[pivot-self.lags:pivot])

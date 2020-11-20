@@ -41,6 +41,11 @@ class Model(nn.Module):
         cell_state = torch.zeros(self.num_layers, batch_size, self.num_hidden, device=device)
         self.hidden = (hidden_state, cell_state)
 
+    def perturbed_forward(self, x):
+        x = self.fc(x).squeeze()
+        x = torch.sigmoid(x)
+        return x
+
     def forward(self, x):
         batch_size, seq_len, _ = x.size()
         self.init_hidden(batch_size)
@@ -56,8 +61,7 @@ class Model(nn.Module):
         weights = F.softmax(attn_score, dim=1)
         weighted = torch.mul(lstm_out, weights.unsqueeze(-1).expand_as(lstm_out))
         weighted_sum = torch.sum(weighted, dim=1)
-        x = torch.cat((lstm_out[:, -1, :], weighted_sum), 1)
-        x = self.fc(x).squeeze()
-        x = F.sigmoid(x)
-        return x
-
+        feature = torch.cat((lstm_out[:, -1, :], weighted_sum), 1)
+        y = self.fc(feature).squeeze()
+        y = torch.sigmoid(y)
+        return y, feature
