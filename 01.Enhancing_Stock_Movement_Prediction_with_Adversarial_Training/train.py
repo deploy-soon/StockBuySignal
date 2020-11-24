@@ -16,17 +16,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
-parser = argparse.ArgumentParser(description="Train Step",
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-parser.add_argument('--epochs', type=int, default=100)
-parser.add_argument('--batch_size', type=int, default=1024)
-parser.add_argument('--lr', type=int, default=0.001)
-parser.add_argument('--lags', type=int, default=5)
-parser.add_argument('--stock_code', type=str)
-parser.add_argument('--verbose', type=str2bool, default=False)
-args = parser.parse_args()
-
 
 def fgsm_attach(feature, feature_grad, epsilon=1e-3):
     # TODO: feature_grad.sign()
@@ -57,14 +46,16 @@ class Train:
     def __init__(self, args, dataset=None, model_cls=None):
         self.epochs = args.epochs
         self.verbose = args.verbose
-        self.epsilon = 0.001
+        self.epsilon = args.epsilon
+        self.regularizer = args.regularizer
+        self.is_regression = args.is_regression
 
         if dataset is None:
-            dataset = TrainDataset(stock_code=args.stock_code,
-                                   lags=args.lags)
+            dataset = TrainDataset(lags=args.lags,
+                                   is_regression=args.is_regression)
 
         data_len = len(dataset)
-        self.train_num = int(data_len * 0.85)
+        self.train_num = int(data_len * 0.8)
         self.vali_num = data_len - self.train_num
         trainset, valiset = random_split(dataset, [self.train_num,
                                                    self.vali_num])
@@ -84,8 +75,9 @@ class Train:
             self.model = nn.DataParallel(self.model)
         self.model.cuda()
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr)
-        self.model_path = pjoin("weight", args.stock_code + ".pt")
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr,
+                                          weight_decay=self.regularizer)
+        self.model_path = pjoin("weight", "model.pt")
 
     def train(self, epoch, criterion):
         self.model.train()
@@ -94,25 +86,31 @@ class Train:
             X = X.to(device)
             y = y.to(device)
             score, feature = self.model(X)
+            if not self.is_regression:
+                score = torch.sigmoid(score)
             loss = criterion(score, y)
-
             self.optimizer.zero_grad()
-            feature_grad = torch.autograd.grad(loss, [feature],
-                                               retain_graph=True)[0]
 
-            perturbed_feature = fgsm_attach(feature, feature_grad,
-                                            epsilon=self.epsilon)
-            adv_score = self.model.perturbed_forward(perturbed_feature)
-            adv_loss = criterion(adv_score, y)
-            loss = loss + adv_loss
-            loss.backward()
+            tot_loss = loss
+            if self.use_adversarial:
+                feature_grad = torch.autograd.grad(loss, [feature],
+                                                   retain_graph=True)[0]
+
+                perturbed_feature = fgsm_attach(feature, feature_grad,
+                                                epsilon=self.epsilon)
+                adv_score = self.model.perturbed_forward(perturbed_feature)
+                if not self.is_regression:
+                    adv_score = torch.sigmoid(adv_score)
+                adv_loss = criterion(adv_score, y)
+                tot_loss += adv_loss
+            tot_loss.backward()
 
             self.optimizer.step()
             total_loss += loss.item() * X.size(0)
         total_loss /= self.train_num
         return total_loss
 
-    def validate(self, epoch, loss_func):
+    def validate(self, epoch, criterion):
         self.model.eval()
         total_loss = 0.0
         preds, trues = [], []
@@ -120,19 +118,22 @@ class Train:
             X = X.to(device)
             y = y.to(device)
             score, _ = self.model(X)
+            if not self.is_regression:
+                score = torch.sigmoid(score)
             trues += y.tolist()
             preds += score.tolist()
-            loss = loss_func(score, y)
+            loss = criterion(score, y)
             total_loss += loss.item() * X.size(0)
         total_loss /= self.vali_num
 
-        template = "LOSS: {:.4}, ACC: {:.4}, MCC: {:.4}"
-        print(template.format(total_loss, get_Acc(preds, trues),
-                              get_MCC(preds, trues)))
+        if self.verbose and not self.is_regression:
+            template = "LOSS: {:.4}, ACC: {:.4}, MCC: {:.4}"
+            print(template.format(total_loss, get_Acc(preds, trues),
+                                  get_MCC(preds, trues)))
         return total_loss
 
     def run(self):
-        loss_func = nn.BCELoss()
+        loss_func = nn.MSELoss(reduction="mean") if self.is_regression else nn.BCELoss()
         if self.verbose:
             print(self.model)
         tot_vali_loss = np.inf
@@ -145,8 +146,24 @@ class Train:
                 tot_vali_loss = vali_loss
                 torch.save(self.model.state_dict(), self.model_path)
 
+def main():
+    parser = argparse.ArgumentParser(description="Train Step",
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=1024)
+    parser.add_argument('--hidden_num', type=int, default=16)
+    parser.add_argument('--lr', type=int, default=0.001)
+    parser.add_argument('--lags', type=int, default=5)
+    parser.add_argument('--epsilon', type=float, default=0.001)
+    parser.add_argument('--regularizer', type=float, default=0.001)
+    parser.add_argument('--is_regression', type=str2bool, default=False)
+    parser.add_argument('--use_adversarial', type=str2bool, default=True)
+    parser.add_argument('--verbose', type=str2bool, default=False)
+    args = parser.parse_args()
 
-if __name__ == "__main__":
     train = Train(args)
     train.run()
+
+if __name__ == "__main__":
+    main()
 

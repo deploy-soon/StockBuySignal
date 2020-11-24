@@ -24,25 +24,53 @@ def get_moving_data(data, n=5):
     return res
 
 
+def binary_labeler(x):
+    if x >= 0.0055:
+        return 1.
+    elif x <= -0.005:
+        return 0.
+    else:
+        return None
+
+
 class TrainDataset(Dataset):
 
-    def __init__(self, stock_code, lags=7, todate=20180701):
+    def __init__(self, lags=7, is_regression=False, todate=20190101):
         self.lags = lags
         self.todate = todate
         self.start_num = 30
         self.rolling = 1
 
-        x, y = self.load(stock_code)
+        if is_regression:
+            self.labeler = lambda x: x
+        else:
+            self.labeler = binary_labeler
+
+        self.data_dir = "/data/date"
+
+        x, y = self.load()
         print("data num: ", len(x))
         self.x = x
         self.y = y
 
-    def load(self, stock_code):
-        data_dir = "/data/date"
+
+    def load(self):
+        Xs, ys = [], []
+        for stock_code in tqdm(os.listdir(self.data_dir)):
+            X, y = self.load_stock_code(stock_code)
+            assert len(X) == len(y)
+            Xs += X
+            ys += y
+        print("LOAD {} data".format(len(ys)))
+        Xs = np.array(Xs, dtype=np.float32)
+        ys = np.array(ys, dtype=np.float32)
+        return Xs, ys
+
+    def load_stock_code(self, stock_code):
         Xs, ys = [], []
 
         dates, opens, highs, lows, closes = [], [], [], [], []
-        with open(pjoin(data_dir, stock_code+".csv")) as fout:
+        with open(pjoin(self.data_dir, stock_code)) as fout:
             reader = csv.reader(fout, delimiter=',')
             for row in reader:
                 d, o, h, l, c, v = map(int, row)
@@ -52,6 +80,9 @@ class TrainDataset(Dataset):
                 lows.append(l)
                 closes.append(c)
         data_len = len(opens)
+        if data_len < 300:
+            return [], []
+
         c_open = get_close_data(opens, closes)
         c_high = get_close_data(highs, closes)
         c_low = get_close_data(lows, closes)
@@ -79,15 +110,11 @@ class TrainDataset(Dataset):
         for pivot in range(self.start_num + self.lags, data_len - self.rolling):
             if dates[pivot] > self.todate:
                 continue
-            if y[pivot-1] >= 0.0055:
-                ys.append(1.)
-            elif y[pivot-1] <= -0.005:
-                ys.append(0.)
-            else:
+            label = self.labeler(y[pivot-1])
+            if label is None:
                 continue
+            ys.append(label)
             Xs.append(X[pivot-self.lags:pivot])
-        Xs = np.array(Xs, dtype=np.float32)
-        ys = np.array(ys, dtype=np.float32)
         return Xs, ys
 
     def __getitem__(self, idx):
