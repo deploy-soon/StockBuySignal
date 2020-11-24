@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torch.utils.data import Subset, Dataset, DataLoader, random_split
 
-from data import TrainDataset
+from data import StockDataset
 from model import Model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -47,11 +47,13 @@ class Train:
         self.epochs = args.epochs
         self.verbose = args.verbose
         self.epsilon = args.epsilon
+        self.beta = args.beta
         self.regularizer = args.regularizer
         self.is_regression = args.is_regression
+        self.use_adversarial = args.use_adversarial
 
         if dataset is None:
-            dataset = TrainDataset(lags=args.lags,
+            dataset = StockDataset(lags=args.lags,
                                    is_regression=args.is_regression)
 
         data_len = len(dataset)
@@ -77,7 +79,7 @@ class Train:
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr,
                                           weight_decay=self.regularizer)
-        self.model_path = pjoin("weight", "model.pt")
+        self.model_path = args.model_path
 
     def train(self, epoch, criterion):
         self.model.train()
@@ -102,7 +104,7 @@ class Train:
                 if not self.is_regression:
                     adv_score = torch.sigmoid(adv_score)
                 adv_loss = criterion(adv_score, y)
-                tot_loss += adv_loss
+                tot_loss += self.beta * adv_loss
             tot_loss.backward()
 
             self.optimizer.step()
@@ -155,7 +157,9 @@ def main():
     parser.add_argument('--lr', type=int, default=0.001)
     parser.add_argument('--lags', type=int, default=5)
     parser.add_argument('--epsilon', type=float, default=0.001)
+    parser.add_argument('--beta', type=float, default=0.001)
     parser.add_argument('--regularizer', type=float, default=0.001)
+    parser.add_argument('--model_path', type=str, default="weight/model.pt")
     parser.add_argument('--is_regression', type=str2bool, default=False)
     parser.add_argument('--use_adversarial', type=str2bool, default=True)
     parser.add_argument('--verbose', type=str2bool, default=False)

@@ -33,11 +33,13 @@ def binary_labeler(x):
         return None
 
 
-class TrainDataset(Dataset):
+class StockDataset(Dataset):
 
-    def __init__(self, lags=7, is_regression=False, todate=20190101):
+    def __init__(self, lags=7, is_regression=False, todate=20190101,
+                 is_train=True):
         self.lags = lags
         self.todate = todate
+        self.is_train = is_train
         self.start_num = 30
         self.rolling = 1
 
@@ -49,7 +51,6 @@ class TrainDataset(Dataset):
         self.data_dir = "/data/date"
 
         x, y = self.load()
-        print("data num: ", len(x))
         self.x = x
         self.y = y
 
@@ -108,8 +109,10 @@ class TrainDataset(Dataset):
             ###################################################################
 
         for pivot in range(self.start_num + self.lags, data_len - self.rolling):
-            if dates[pivot] > self.todate:
-                continue
+            if self.is_train and dates[pivot] > self.todate:
+                continue # FOR TRAIN
+            if not self.is_train and dates[pivot] <= self.todate:
+                continue # FOR TEST
             label = self.labeler(y[pivot-1])
             if label is None:
                 continue
