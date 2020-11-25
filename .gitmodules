@@ -1,0 +1,4 @@
+[submodule "3rd/stock-data"]
+	path = 3rd/stock-data
+	url = https://github.com/deploy-soon/stock-data.git
+	branch = main
