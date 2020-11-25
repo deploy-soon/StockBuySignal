@@ -53,7 +53,8 @@ class Train:
         self.use_adversarial = args.use_adversarial
 
         if dataset is None:
-            dataset = StockDataset(lags=args.lags,
+            dataset = StockDataset(data_path=args.data_path,
+                                   lags=args.lags,
                                    is_regression=args.is_regression)
 
         data_len = len(dataset)
@@ -157,8 +158,9 @@ def main():
     parser.add_argument('--lags', type=int, default=5)
     parser.add_argument('--epsilon', type=float, default=0.001)
     parser.add_argument('--beta', type=float, default=0.001)
-    parser.add_argument('--regularizer', type=float, default=0.001)
+    parser.add_argument('--regularizer', type=float, default=0.)
     parser.add_argument('--model_path', type=str, default="weight/model.pt")
+    parser.add_argument('--data_path', type=str, default="../3rd/stock-data/kospi200")
     parser.add_argument('--is_regression', type=str2bool, default=False)
     parser.add_argument('--use_adversarial', type=str2bool, default=True)
     parser.add_argument('--verbose', type=str2bool, default=False)

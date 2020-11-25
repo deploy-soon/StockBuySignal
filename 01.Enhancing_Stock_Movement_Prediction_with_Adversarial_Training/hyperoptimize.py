@@ -21,14 +21,17 @@ def optimizer_ALSTM():
             beta = None
             regularizer = l
             model_path = "weight/model.pt"
+            data_path = "../3rd/stock-data/kospi200"
             namespace = "res/model"
             is_regression = False
             use_adversarial = False
             verbose = False
 
-        train_dataset = StockDataset(lags=args.lags, is_train=True,
+        train_dataset = StockDataset(data_path=args.data_path
+                                     lags=args.lags, is_train=True,
                                      is_regression=args.is_regression)
         test_dataset = StockDataset(lags=args.lags, is_train=False,
+                                    data_path=args.data_path,
                                     is_regression=args.is_regression)
 
         performances = []

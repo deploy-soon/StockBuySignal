@@ -24,7 +24,8 @@ def save(path, content):
 def test(args, dataset=None):
 
     if dataset is None:
-        dataset = StockDataset(lags=args.lags,
+        dataset = StockDataset(data_path=args.data_path,
+                               lags=args.lags,
                                is_regression=args.is_regression,
                                is_train=False)
     test_loader = DataLoader(dataset, batch_size=args.batch_size,
@@ -75,6 +76,7 @@ def main():
     parser.add_argument('--lr', type=int, default=0.001)
     parser.add_argument('--lags', type=int, default=5)
     parser.add_argument('--model_path', type=str, default="weight/model.pt")
+    parser.add_argument('--data_path', type=str, default="../3rd/stock-data/kospi200")
     parser.add_argument('--namespace', type=str, default="res/model")
     parser.add_argument('--is_regression', type=str2bool, default=False)
     parser.add_argument('--verbose', type=str2bool, default=False)

@@ -35,7 +35,7 @@ def binary_labeler(x):
 
 class StockDataset(Dataset):
 
-    def __init__(self, lags=7, is_regression=False, todate=20190101,
+    def __init__(self, data_path, lags=7, is_regression=False, todate=20190101,
                  is_train=True):
         self.lags = lags
         self.todate = todate
@@ -48,7 +48,7 @@ class StockDataset(Dataset):
         else:
             self.labeler = binary_labeler
 
-        self.data_dir = "/data/date"
+        self.data_dir = data_path
 
         x, y = self.load()
         self.x = x
