@@ -6,7 +6,7 @@ from test import test
 def optimizer_ALSTM():
     U = [4, 8, 16, 32]
     T = [2, 3, 4, 5, 10, 15]
-    lamb = [0.001, 0.01, 0.1, 1.]
+    lamb = [1e-4, 1e-5, 1e-6, 0.]
 
     best_performance = 0.0
     best_config = None

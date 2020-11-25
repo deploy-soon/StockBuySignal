@@ -76,7 +76,6 @@ class Train:
         if torch.cuda.device_count() > 1:
             self.model = nn.DataParallel(self.model)
         self.model.cuda()
-
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr,
                                           weight_decay=self.regularizer)
         self.model_path = args.model_path
