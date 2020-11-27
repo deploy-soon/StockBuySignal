@@ -87,7 +87,7 @@ def optimizer_Adv_ALSTM(u, t, l):
             performances.append(performance)
         mean_perf = sum(performances) / len(performances)
         print("beta: {}, epsilon: {}, performance: {:.4}".format(
-            beta, epsilon, mean_perf))
+            b, e, mean_perf))
         if mean_perf > best_performance:
             best_performance = mean_perf
             best_config = (b, e)
